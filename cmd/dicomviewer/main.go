@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strconv"
 
@@ -9,7 +11,9 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -25,6 +29,7 @@ type viewer struct {
 	currentFrame           int
 	image                  *canvas.Image
 	study, name, id, frame *widget.Label
+	level, width           *widget.Entry
 
 	win fyne.Window
 }
@@ -60,14 +65,17 @@ func (v *viewer) loadImage(data dicom.Dataset) {
 		} else if elem.Tag == tag.StudyDescription {
 			v.study.SetText(fmt.Sprintf("%v", elem.Value))
 		} else if elem.Tag == tag.WindowCenter {
-			l, _ := strconv.Atoi(fmt.Sprintf("%v", elem.Value))
+			str := fmt.Sprintf("%v", elem.Value.GetValue().([]string)[0])
+			l, _ := strconv.Atoi(str)
 			v.dicom.SetWindowLevel(int16(l))
+			v.level.SetText(str)
 		} else if elem.Tag == tag.WindowWidth {
-			l, _ := strconv.Atoi(fmt.Sprintf("%v", elem.Value))
+			str := fmt.Sprintf("%v", elem.Value.GetValue().([]string)[0])
+			l, _ := strconv.Atoi(str)
 			v.dicom.SetWindowWidth(int16(l))
+			v.width.SetText(str)
 		}
 	}
-
 }
 
 func (v *viewer) loadKeys() {
@@ -87,8 +95,32 @@ func (v *viewer) fullScreen() {
 	v.win.SetFullScreen(!v.win.FullScreen())
 }
 
+func (v *viewer) loadFile(r io.ReadCloser, length int64) {
+	data, err := dicom.Parse(r, length, nil)
+	if err != nil {
+		dialog.ShowError(err, v.win)
+		return
+	}
+
+	err = r.Close()
+
+	v.loadImage(data)
+}
+
 func (v *viewer) nextFrame() {
 	v.setFrame(v.currentFrame + 1)
+}
+
+func (v *viewer) openFile() {
+	d := dialog.NewFileOpen(func (f fyne.URIReadCloser, err error) {
+		if f == nil || err != nil {
+			return
+		}
+
+		v.loadFile(f, fileLength(f.URI().Path())) // TODO work with library upstream to not do this
+	}, v.win)
+	d.SetFilter(storage.NewExtensionFileFilter([]string{".dcm"}))
+	d.Show()
 }
 
 func (v *viewer) previousFrame() {
@@ -105,25 +137,25 @@ func (v *viewer) setupForm(dicomImg *dicomgraphics.DICOMImage, img *canvas.Image
 	v.study = widget.NewLabel("ANON")
 	values.Append("Study", v.study)
 
-	level := widget.NewEntry()
-	level.SetText(fmt.Sprintf("%d", dicomImg.WindowLevel()))
-	level.OnChanged = func(val string) {
+	v.level = widget.NewEntry()
+	v.level.SetText(fmt.Sprintf("%d", dicomImg.WindowLevel()))
+	v.level.OnChanged = func(val string) {
 		l, _ := strconv.Atoi(val)
 		dicomImg.SetWindowLevel(int16(l))
 
 		canvas.Refresh(img)
 	}
-	values.Append("Level", level)
+	values.Append("Level", v.level)
 
-	width := widget.NewEntry()
-	width.SetText(fmt.Sprintf("%d", dicomImg.WindowWidth()))
-	width.OnChanged = func(val string) {
+	v.width = widget.NewEntry()
+	v.width.SetText(fmt.Sprintf("%d", dicomImg.WindowWidth()))
+	v.width.OnChanged = func(val string) {
 		w, _ := strconv.Atoi(val)
 		dicomImg.SetWindowWidth(int16(w))
 
 		canvas.Refresh(img)
 	}
-	values.Append("Width", width)
+	values.Append("Width", v.width)
 
 	return values
 }
@@ -157,8 +189,10 @@ func makeUI(a fyne.App) *viewer {
 	img.FillMode = canvas.ImageFillContain
 
 	view := &viewer{dicom: dicomImg, image: img, win: win}
+	toolbar := widget.NewToolbar(widget.NewToolbarAction(theme.FolderOpenIcon(), view.openFile))
+
 	form := view.setupForm(dicomImg, img)
-	items := []fyne.CanvasObject{form}
+	items := []fyne.CanvasObject{toolbar, form}
 	items = append(items, view.setupNavigation()...)
 	bar := container.NewVBox(items...)
 
@@ -166,6 +200,21 @@ func makeUI(a fyne.App) *viewer {
 	win.Resize(fyne.NewSize(600, 400))
 
 	return view
+}
+
+func fileLength(path string) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+
+	return info.Size()
 }
 
 func showError(err string, a fyne.App) {
@@ -182,20 +231,17 @@ func showError(err string, a fyne.App) {
 func main() {
 	a := app.New()
 
-	if len(os.Args) != 2 {
-		showError("Must pass a parameter - the file to open", a)
-		return
-	}
-
-	path := os.Args[1]
-	data, err := dicom.ParseFile(path, nil)
-	if err != nil {
-		showError("Error parsing "+path, a)
-		return
-	}
-
 	ui := makeUI(a)
-	ui.loadImage(data)
+	if len(os.Args) > 1 {
+		path := os.Args[1]
+		r, err := os.Open(path)
+		if err != nil {
+			log.Println("Failed to load file at path:", path)
+			return
+		}
+		ui.loadFile(r, fileLength(path))
+	}
+
 	ui.loadKeys()
 	ui.win.ShowAndRun()
 }
