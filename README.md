@@ -1,5 +1,7 @@
 # dicomgraphics
 
+> This repository has moved to [Fyne Labs](https://github.com/fynelabs/dicomgraphics)
+
 A DICOM image viewer and utilities.
 
 ## dicomviewer
